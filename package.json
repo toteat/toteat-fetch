@@ -1,0 +1,39 @@
+{
+  "name": "toteat-fetch",
+  "version": "0.1.0",
+  "description": "Minimal fetch-based HTTP client with axios-compatible API surface",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./ts": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "files": ["dist", "src"],
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "type-check": "tsc --noEmit",
+    "prepare": "tsc"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+ssh://git@github.com/toteat/toteat-fetch.git"
+  },
+  "license": "UNLICENSED",
+  "devDependencies": {
+    "typescript": "~6.0.0",
+    "vitest": "^2.0.0",
+    "jsdom": "^26.0.0"
+  }
+}
