@@ -384,13 +384,13 @@ describe('fetchClient - Browser Tests', () => {
       await expect(client.get('/test')).rejects.toThrow('Network Error');
     });
 
-    it('should throw HttpClientError for AbortError (external abort is Network Error)', async () => {
+    it('should throw HttpClientError for AbortError (external abort)', async () => {
       const client = createHttpClient({ timeout: 100 });
       const abortError = new DOMException('Aborted', 'AbortError');
       vi.stubGlobal('fetch', vi.fn().mockRejectedValue(abortError));
 
       await expect(client.get('/test')).rejects.toThrow(HttpClientError);
-      await expect(client.get('/test')).rejects.toThrow('Network Error');
+      await expect(client.get('/test')).rejects.toThrow('Request aborted');
     });
 
     it('should throw HttpClientError for TimeoutError', async () => {
@@ -402,7 +402,7 @@ describe('fetchClient - Browser Tests', () => {
       await expect(client.get('/test')).rejects.toThrow('timeout');
     });
 
-    it('should report "Network Error" (not timeout) when fetch is aborted externally', async () => {
+    it('should report "Request aborted" (not timeout) when fetch is aborted externally', async () => {
       vi.stubGlobal(
         'fetch',
         vi.fn().mockRejectedValue(new DOMException('The user aborted a request.', 'AbortError')),
@@ -415,7 +415,7 @@ describe('fetchClient - Browser Tests', () => {
         expect.fail('should have thrown');
       } catch (err) {
         expect(err).toBeInstanceOf(HttpClientError);
-        expect((err as HttpClientError).message).toBe('Network Error');
+        expect((err as HttpClientError).message).toBe('Request aborted');
         expect((err as HttpClientError).message).not.toContain('timeout');
       }
     });

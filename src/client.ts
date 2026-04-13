@@ -8,7 +8,6 @@ import type {
   ResponseInterceptorType,
   ResponseErrorHandlerType,
 } from './types.js';
-import { HttpClientError } from './types.js';
 import { InterceptorManager } from './interceptors.js';
 import { isStreamBody } from './utils.js';
 import { executeRequest } from './request.js';
@@ -17,8 +16,8 @@ const defaultValidateStatus = (status: number): boolean =>
   status >= 200 && status < 300;
 
 export function createHttpClient(defaults: FetchClientConfig = {}): FetchClientInstance {
-  if (defaults.timeout !== undefined && defaults.timeout <= 0) {
-    throw new HttpClientError(`Invalid timeout: ${defaults.timeout}. Must be a positive number.`);
+  if (defaults.timeout !== undefined && (!Number.isFinite(defaults.timeout) || defaults.timeout <= 0)) {
+    throw new TypeError(`Invalid timeout: ${defaults.timeout}. Must be a finite positive number.`);
   }
 
   const interceptors = {

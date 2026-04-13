@@ -35,7 +35,7 @@ export interface FetchResponse<T = unknown> {
 // ---------------------------------------------------------------------------
 
 export class HttpClientError extends Error {
-  readonly response?: Readonly<{ data: unknown; status: number; headers: Record<string, string> }>;
+  readonly response?: Readonly<{ data: unknown; status: number; headers: Readonly<Record<string, string>> }>;
 
   constructor(
     message: string,
@@ -47,7 +47,7 @@ export class HttpClientError extends Error {
     super(message, { cause });
     Object.defineProperty(this, 'name', { value: 'HttpClientError', writable: false, enumerable: false, configurable: false });
     if (status !== undefined) {
-      this.response = Object.freeze({ data, status, headers: headers ?? {} });
+      this.response = Object.freeze({ data, status, headers: Object.freeze({ ...(headers ?? {}) }) }) as Readonly<{ data: unknown; status: number; headers: Readonly<Record<string, string>> }>;
     }
   }
 }
@@ -56,16 +56,26 @@ export class HttpClientError extends Error {
 // Internal interceptor types
 // ---------------------------------------------------------------------------
 
-/** Public type for request interceptor configs — body is internal, not user-facing. */
-export type InterceptorRequestConfig = Omit<InternalRequestConfig, 'body'>;
+/** Public interface for request interceptor configs. Body is transport-layer only — not visible to interceptors. */
+export interface InterceptorRequestConfig {
+  url: string;
+  method: string;
+  baseURL: string;
+  headers: Record<string, string>;
+  params: Record<string, ParamValue | ParamValue[]>;
+  timeout: number;
+  validateStatus: (status: number) => boolean;
+  credentials?: RequestCredentials;
+  signal?: AbortSignal;
+}
 
 export type RequestInterceptorType = (
-  config: InternalRequestConfig,
-) => InternalRequestConfig | Promise<InternalRequestConfig>;
+  config: InterceptorRequestConfig,
+) => InterceptorRequestConfig | Promise<InterceptorRequestConfig>;
 
 export type RequestErrorHandlerType = (
   error: unknown,
-) => InternalRequestConfig | Promise<InternalRequestConfig>;
+) => InterceptorRequestConfig | null | undefined | Promise<InterceptorRequestConfig | null | undefined>;
 
 export type ResponseInterceptorType = (
   response: FetchResponse,
@@ -84,17 +94,8 @@ export interface InterceptorEntry<F, R> {
 // Internal request config
 // ---------------------------------------------------------------------------
 
-export interface InternalRequestConfig {
-  url: string;
-  method: string;
-  baseURL: string;
-  headers: Record<string, string>;
-  params: Record<string, ParamValue | ParamValue[]>;
+export interface InternalRequestConfig extends InterceptorRequestConfig {
   body?: BodyInit | null;
-  timeout: number;
-  validateStatus: (status: number) => boolean;
-  credentials?: RequestCredentials;
-  signal?: AbortSignal;
 }
 
 // ---------------------------------------------------------------------------

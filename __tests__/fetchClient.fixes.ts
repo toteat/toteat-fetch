@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { createHttpClient, HttpClientError } from 'toteat-fetch';
+import type { FetchResponse } from 'toteat-fetch';
 import { mockResponse, mock204Response } from './helpers.js';
 
 describe('Audit Fixes', () => {
@@ -695,7 +696,7 @@ describe('Audit Fixes', () => {
       } catch (err) {
         const error = err as HttpClientError;
         expect(error.cause).toBe(timeoutError);
-        expect(error.message).toContain('timeout');
+        expect(error.message).toBe('timeout of 100ms exceeded');
       }
     });
   });
@@ -725,13 +726,22 @@ describe('Audit Fixes', () => {
   // ---------------------------------------------------------------------------
 
   describe('#17 Timeout validation', () => {
-    it('should throw HttpClientError when timeout is 0', () => {
-      expect(() => createHttpClient({ timeout: 0 })).toThrow(HttpClientError);
+    it('should throw TypeError when timeout is 0', () => {
+      expect(() => createHttpClient({ timeout: 0 })).toThrow(TypeError);
       expect(() => createHttpClient({ timeout: 0 })).toThrow('Invalid timeout');
     });
 
-    it('should throw HttpClientError when timeout is negative', () => {
-      expect(() => createHttpClient({ timeout: -1 })).toThrow(HttpClientError);
+    it('should throw TypeError when timeout is negative', () => {
+      expect(() => createHttpClient({ timeout: -1 })).toThrow(TypeError);
+    });
+
+    it('should throw TypeError when timeout is NaN', () => {
+      expect(() => createHttpClient({ timeout: NaN })).toThrow(TypeError);
+      expect(() => createHttpClient({ timeout: NaN })).toThrow('Invalid timeout');
+    });
+
+    it('should throw TypeError when timeout is Infinity', () => {
+      expect(() => createHttpClient({ timeout: Infinity })).toThrow(TypeError);
     });
 
     it('should not throw when timeout is positive', () => {
@@ -860,6 +870,9 @@ describe('Audit Fixes', () => {
       // The signal passed to fetch should be a combined signal (different from the original)
       expect(capturedSignal).toBeDefined();
       expect(capturedSignal).toBeInstanceOf(AbortSignal);
+      // The signal passed to fetch must be a combined signal (AbortSignal.any result),
+      // NOT the raw controller signal
+      expect(capturedSignal).not.toBe(controller.signal);
     });
 
     it('should have an aborted combined signal when controller is aborted', async () => {
@@ -879,6 +892,223 @@ describe('Audit Fixes', () => {
 
       await expect(client.get('/test', { signal: controller.signal })).rejects.toThrow();
       expect(capturedSignal?.aborted).toBe(true);
+    });
+
+    it('should use proxy controller when AbortSignal.any is unavailable', async () => {
+      const client = createHttpClient({ timeout: 5000 });
+      const controller = new AbortController();
+
+      // Temporarily remove AbortSignal.any to test the fallback path
+      const originalAny = (AbortSignal as unknown as Record<string, unknown>).any;
+      delete (AbortSignal as unknown as Record<string, unknown>).any;
+
+      let capturedSignal: AbortSignal | undefined;
+      vi.stubGlobal('fetch', vi.fn().mockImplementation((_url: string, init: RequestInit) => {
+        capturedSignal = init.signal as AbortSignal;
+        return new Promise((_resolve, reject) => {
+          init.signal!.addEventListener('abort', () =>
+            reject(new DOMException('Aborted', 'AbortError')),
+          );
+          Promise.resolve().then(() => controller.abort());
+        });
+      }));
+
+      try {
+        await expect(client.get('/test', { signal: controller.signal })).rejects.toThrow();
+        // Fallback creates a proxy signal, not the original
+        expect(capturedSignal).toBeInstanceOf(AbortSignal);
+        expect(capturedSignal).not.toBe(controller.signal);
+        expect(capturedSignal?.aborted).toBe(true);
+      } finally {
+        (AbortSignal as unknown as Record<string, unknown>).any = originalAny;
+      }
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // #22 HttpClientError without status — response must be undefined
+  // ---------------------------------------------------------------------------
+
+  describe('#22 HttpClientError no-status response', () => {
+    it('should have undefined response when constructed without status', () => {
+      const e = new HttpClientError('Network Error');
+      expect(e.response).toBeUndefined();
+    });
+
+    it('should have defined response when constructed with status', () => {
+      const e = new HttpClientError('fail', 422, { detail: 'bad' }, {});
+      expect(e.response).toBeDefined();
+      expect(e.response!.status).toBe(422);
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // #23 HttpClientError.response is deeply frozen
+  // ---------------------------------------------------------------------------
+
+  describe('#23 HttpClientError.response is frozen', () => {
+    it('should freeze the response object', () => {
+      const e = new HttpClientError('fail', 422, { detail: 'bad' }, { 'x-id': '1' });
+      expect(Object.isFrozen(e.response)).toBe(true);
+    });
+
+    it('should deep-freeze the headers inside response', () => {
+      const e = new HttpClientError('fail', 422, undefined, { 'x-id': '1' });
+      expect(Object.isFrozen(e.response!.headers)).toBe(true);
+    });
+
+    it('should not allow mutating response headers', () => {
+      const e = new HttpClientError('fail', 422, undefined, { 'x-id': '1' });
+      expect(() => {
+        (e.response!.headers as Record<string, string>)['injected'] = 'bad';
+      }).toThrow(TypeError); // strict mode throws on frozen object mutation
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // #24 Recovered HTTP error does not run through fulfilled interceptors
+  // ---------------------------------------------------------------------------
+
+  describe('#24 HTTP error recovery bypasses fulfilled interceptors', () => {
+    it('should not call fulfilled interceptors when error interceptor recovers', async () => {
+      const client = createHttpClient();
+      const fulfilledSpy = vi.fn((r: FetchResponse<unknown>) => r);
+      client.interceptors.response.use(
+        fulfilledSpy,
+        () => Promise.resolve({ data: { recovered: true }, status: 200, headers: {} }),
+      );
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(mockResponse(500, {})));
+
+      const resp = await client.get('/test');
+      expect(resp.data).toEqual({ recovered: true });
+      // Error was recovered before the fulfilled loop — fulfilled must not have run
+      expect(fulfilledSpy).not.toHaveBeenCalled();
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // #25 Request interceptor — rejected handler that also throws
+  // ---------------------------------------------------------------------------
+
+  describe('#25 Request interceptor rejected also throws', () => {
+    it('should propagate the rejection error when rejected handler throws', async () => {
+      const client = createHttpClient();
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(mockResponse(200, {})));
+
+      const rejectionError = new Error('recovery also failed');
+      client.interceptors.request.use(
+        () => { throw new Error('fulfilled failed'); },
+        () => { throw rejectionError; },
+      );
+
+      await expect(client.get('/test')).rejects.toBe(rejectionError);
+    });
+
+    it('should propagate through next interceptor rejected handler when first rejected throws', async () => {
+      const client = createHttpClient();
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(mockResponse(200, { ok: true })));
+
+      client.interceptors.request.use(
+        () => { throw new Error('fulfilled failed'); },
+        (err) => { throw err; }, // re-throw, pass to next
+      );
+      // Second interceptor recovers
+      client.interceptors.request.use(
+        (config) => config,
+        () => ({
+          url: '/test', method: 'GET', baseURL: '', headers: {},
+          params: {}, timeout: 30000, validateStatus: (s: number) => s >= 200 && s < 300,
+        }),
+      );
+
+      const resp = await client.get('/test');
+      expect(resp.data).toEqual({ ok: true });
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // #26 Abort message distinguishes intentional abort from network failure
+  // ---------------------------------------------------------------------------
+
+  describe('#26 Abort message', () => {
+    it('should use "Request aborted" message when signal is aborted', async () => {
+      const client = createHttpClient();
+      const abortError = new DOMException('The user aborted a request.', 'AbortError');
+      vi.stubGlobal('fetch', vi.fn().mockRejectedValue(abortError));
+
+      try {
+        await client.get('/test');
+        expect.fail('Should have thrown');
+      } catch (err) {
+        const error = err as HttpClientError;
+        expect(error.message).toBe('Request aborted');
+        expect(error.cause).toBe(abortError);
+      }
+    });
+
+    it('should use "Network Error" message for genuine network failures', async () => {
+      const client = createHttpClient();
+      vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('ECONNREFUSED')));
+
+      try {
+        await client.get('/test');
+        expect.fail('Should have thrown');
+      } catch (err) {
+        const error = err as HttpClientError;
+        expect(error.message).toBe('Network Error');
+      }
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // #27 CRLF validation errors route through response rejected interceptors
+  // ---------------------------------------------------------------------------
+
+  describe('#27 CRLF error routing through response interceptors', () => {
+    it('should route CRLF header error through response rejected interceptors', async () => {
+      const client = createHttpClient();
+      const recovered: FetchResponse<unknown> = { data: null, status: 400, headers: {} };
+      const rejectedSpy = vi.fn().mockResolvedValue(recovered);
+      client.interceptors.response.use(undefined, rejectedSpy);
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(mockResponse(200, {})));
+
+      const result = await client.get('/test', { headers: { 'Bad\r\nHeader': 'val' } });
+
+      expect(rejectedSpy).toHaveBeenCalledOnce();
+      expect(result.data).toBeNull();
+      expect(result.status).toBe(400);
+    });
+
+    it('should propagate CRLF error if no response interceptor recovers it', async () => {
+      const client = createHttpClient();
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(mockResponse(200, {})));
+
+      await expect(
+        client.get('/test', { headers: { 'Bad\r\nHeader': 'val' } }),
+      ).rejects.toBeInstanceOf(HttpClientError);
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // #28 onSignalAbort listener is removed after successful request (fallback path)
+  // ---------------------------------------------------------------------------
+
+  describe('#28 Listener cleanup in fallback abort signal path', () => {
+    it('should remove abort listener from signal after successful request', async () => {
+      const originalAny = (AbortSignal as unknown as Record<string, unknown>).any;
+      delete (AbortSignal as unknown as Record<string, unknown>).any;
+      try {
+        const client = createHttpClient({ timeout: 5000 });
+        const controller = new AbortController();
+        const removeSpy = vi.spyOn(controller.signal, 'removeEventListener');
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue(mockResponse(200, { ok: true })));
+
+        await client.get('/test', { signal: controller.signal });
+
+        expect(removeSpy).toHaveBeenCalledWith('abort', expect.any(Function));
+      } finally {
+        (AbortSignal as unknown as Record<string, unknown>).any = originalAny;
+      }
     });
   });
 });

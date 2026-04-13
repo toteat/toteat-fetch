@@ -21,28 +21,74 @@ export async function executeRequest<T>(
 ): Promise<FetchResponse<T>> {
   let processedConfig = { ...config, headers: { ...config.headers }, params: { ...config.params } };
 
-  // Request interceptors — support async, chain errors
-  for (const entry of interceptors.request.handlers) {
-    if (entry?.fulfilled) {
-      try {
-        processedConfig = await Promise.resolve(entry.fulfilled(processedConfig));
-      } catch (err) {
-        if (entry.rejected) {
-          const recovered = await Promise.resolve(entry.rejected(err));
-          if (recovered == null) {
-            throw err;
-          }
-          processedConfig = recovered;
-          continue;
+  // -------------------------------------------------------------------------
+  // Request interceptors — indexed loop so errors propagate to subsequent
+  // rejected handlers (fix: errors no longer short-circuit the chain)
+  // -------------------------------------------------------------------------
+  const reqHandlers = interceptors.request.handlers;
+  for (let i = 0; i < reqHandlers.length; i++) {
+    const entry = reqHandlers[i];
+    if (!entry?.fulfilled) continue;
+    try {
+      // Spread-merge preserves body (interceptors see InterceptorRequestConfig, no body field)
+      const result = await Promise.resolve(entry.fulfilled(processedConfig));
+      processedConfig = { ...processedConfig, ...result };
+    } catch (err) {
+      let currentError: unknown = err;
+      let resolved = false;
+      // Propagate through this entry and all remaining rejected handlers
+      for (let j = i; j < reqHandlers.length; j++) {
+        const h = reqHandlers[j];
+        if (!h?.rejected) continue;
+        try {
+          const result = await Promise.resolve(h.rejected(currentError));
+          if (result == null) break; // null return: re-throw current error
+          processedConfig = { ...processedConfig, ...result };
+          resolved = true;
+          i = j; // outer loop continues from j+1
+          break;
+        } catch (nextErr) {
+          currentError = nextErr;
         }
-        throw err;
       }
+      if (!resolved) throw currentError;
     }
   }
 
-  validateHeaders(processedConfig.headers);
+  // Route CRLF/header validation errors through response interceptors
+  // so error interceptors can handle them like any other HttpClientError
+  try {
+    validateHeaders(processedConfig.headers);
+  } catch (err) {
+    let currentError: unknown = err;
+    for (const entry of interceptors.response.handlers) {
+      if (entry?.rejected) {
+        try {
+          return (await entry.rejected(currentError)) as FetchResponse<T>;
+        } catch (nextErr) {
+          currentError = nextErr;
+        }
+      }
+    }
+    throw currentError;
+  }
 
-  const url = buildUrl(processedConfig.baseURL, processedConfig.url, processedConfig.params);
+  let url: string;
+  try {
+    url = buildUrl(processedConfig.baseURL, processedConfig.url, processedConfig.params);
+  } catch (err) {
+    let currentError: unknown = err;
+    for (const entry of interceptors.response.handlers) {
+      if (entry?.rejected) {
+        try {
+          return (await entry.rejected(currentError)) as FetchResponse<T>;
+        } catch (nextErr) {
+          currentError = nextErr;
+        }
+      }
+    }
+    throw currentError;
+  }
 
   const fetchInit: globalThis.RequestInit = {
     method: processedConfig.method,
@@ -56,27 +102,30 @@ export async function executeRequest<T>(
   }
 
   let fallbackTimerId: ReturnType<typeof setTimeout> | undefined;
+  let onSignalAbort: (() => void) | undefined; // hoisted for finally cleanup
   let timedOut = false;
   let fetchResponse: Response;
 
   try {
     if (processedConfig.signal) {
-      // Combine per-request signal with timeout so both are honoured
       if (typeof AbortSignal.any === 'function' && typeof AbortSignal.timeout === 'function') {
         fetchInit.signal = AbortSignal.any([
           processedConfig.signal,
           AbortSignal.timeout(processedConfig.timeout),
         ]);
       } else {
-        // Fallback for environments without AbortSignal.any (pre-Node 20, older browsers).
-        // Combine provided signal + timeout via a proxy AbortController.
+        // Fallback: proxy controller combines provided signal + manual timeout
         const proxyController = new AbortController();
-        const onSignalAbort = (): void => proxyController.abort(processedConfig.signal!.reason);
+        onSignalAbort = (): void => proxyController.abort(processedConfig.signal!.reason);
         processedConfig.signal.addEventListener('abort', onSignalAbort, { once: true });
         fallbackTimerId = setTimeout(() => {
           timedOut = true;
-          processedConfig.signal!.removeEventListener('abort', onSignalAbort);
-          proxyController.abort();
+          if (onSignalAbort) {
+            processedConfig.signal!.removeEventListener('abort', onSignalAbort);
+            onSignalAbort = undefined;
+          }
+          // Use TimeoutError so catch block classifies this as a timeout, not an abort
+          proxyController.abort(new DOMException(`timeout of ${processedConfig.timeout}ms exceeded`, 'TimeoutError'));
         }, processedConfig.timeout);
         fetchInit.signal = proxyController.signal;
       }
@@ -92,11 +141,13 @@ export async function executeRequest<T>(
     }
     fetchResponse = await fetch(url, fetchInit);
   } catch (err) {
-    const isTimeout =
-      timedOut || (err instanceof DOMException && err.name === 'TimeoutError');
+    const isAbort = err instanceof DOMException && err.name === 'AbortError';
+    const isTimeout = timedOut || (err instanceof DOMException && err.name === 'TimeoutError');
     const message = isTimeout
       ? `timeout of ${processedConfig.timeout}ms exceeded`
-      : 'Network Error';
+      : isAbort
+        ? 'Request aborted'
+        : 'Network Error';
     const error = new HttpClientError(message, undefined, undefined, undefined, err);
     let currentError: unknown = error;
     for (const entry of interceptors.response.handlers) {
@@ -112,6 +163,10 @@ export async function executeRequest<T>(
   } finally {
     if (fallbackTimerId !== undefined) {
       clearTimeout(fallbackTimerId);
+    }
+    // Clean up proxy signal listener if request completed without signal firing
+    if (onSignalAbort !== undefined && processedConfig.signal) {
+      processedConfig.signal.removeEventListener('abort', onSignalAbort);
     }
   }
 
@@ -131,6 +186,7 @@ export async function executeRequest<T>(
           fetchResponse.status,
           undefined,
           responseHeaders,
+          parseErr, // preserve original parse error as cause
         );
       }
     } else {
@@ -142,6 +198,7 @@ export async function executeRequest<T>(
           fetchResponse.status,
           undefined,
           responseHeaders,
+          textErr, // preserve original read error as cause
         );
       }
     }
@@ -174,30 +231,35 @@ export async function executeRequest<T>(
     throw currentError;
   }
 
+  // -------------------------------------------------------------------------
+  // Response fulfilled interceptors — on error, chain through remaining
+  // rejected handlers then continue fulfilled loop (no early return on recovery)
+  // -------------------------------------------------------------------------
   const handlerCount = interceptors.response.handlers.length;
   let processedResponse: FetchResponse<T> = response;
   for (let i = 0; i < handlerCount; i++) {
     const entry = interceptors.response.handlers[i];
-    if (entry?.fulfilled) {
-      try {
-        processedResponse = (await Promise.resolve(
-          entry.fulfilled(processedResponse),
-        )) as FetchResponse<T>;
-      } catch (err) {
-        // Fulfilled handler threw — propagate through this and remaining rejected handlers
-        let currentError: unknown = err;
-        for (let j = i; j < handlerCount; j++) {
-          const h = interceptors.response.handlers[j];
-          if (h?.rejected) {
-            try {
-              return (await h.rejected(currentError)) as FetchResponse<T>;
-            } catch (nextErr) {
-              currentError = nextErr;
-            }
-          }
+    if (!entry?.fulfilled) continue;
+    try {
+      processedResponse = (await Promise.resolve(
+        entry.fulfilled(processedResponse),
+      )) as FetchResponse<T>;
+    } catch (err) {
+      let currentError: unknown = err;
+      let resolved = false;
+      for (let j = i; j < handlerCount; j++) {
+        const h = interceptors.response.handlers[j];
+        if (!h?.rejected) continue;
+        try {
+          processedResponse = (await h.rejected(currentError)) as FetchResponse<T>;
+          resolved = true;
+          i = j; // outer loop continues from j+1
+          break;
+        } catch (nextErr) {
+          currentError = nextErr;
         }
-        throw currentError;
       }
+      if (!resolved) throw currentError;
     }
   }
 
