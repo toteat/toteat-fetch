@@ -1,26 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { createHttpClient, HttpClientError } from 'toteat-fetch';
-
-function mockResponse(status: number, data: unknown, contentType = 'application/json'): Response {
-  const responseHeaders = new Headers({ 'content-type': contentType });
-  return {
-    status,
-    ok: status >= 200 && status < 300,
-    headers: responseHeaders,
-    json: () => Promise.resolve(data),
-    text: () => Promise.resolve(typeof data === 'string' ? data : JSON.stringify(data)),
-  } as unknown as Response;
-}
-
-function mock204Response(): Response {
-  return {
-    status: 204,
-    ok: true,
-    headers: new Headers(),
-    json: () => Promise.reject(new Error('No body')),
-    text: () => Promise.resolve(''),
-  } as unknown as Response;
-}
+import { mockResponse, mock204Response } from './helpers.js';
 
 describe('Audit Fixes', () => {
   beforeEach(() => {
@@ -94,6 +74,20 @@ describe('Audit Fixes', () => {
       const headers = init.headers as Record<string, string>;
       expect(headers['content-type']).toBe('text/xml');
       expect(headers['Content-Type']).toBeUndefined();
+    });
+
+    it('should not override Content-Type when set with non-standard casing (e.g. CONTENT-TYPE)', async () => {
+      const client = createHttpClient({
+        headers: { 'CONTENT-TYPE': 'text/xml' },
+      });
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(mockResponse(200, {})));
+
+      await client.post('/test', { key: 'value' });
+
+      const init = vi.mocked(fetch).mock.calls[0][1] as RequestInit;
+      const headers = init.headers as Record<string, string>;
+      expect(headers['Content-Type']).toBeUndefined();
+      expect(headers['CONTENT-TYPE']).toBe('text/xml');
     });
 
     it('should not set Content-Type when no body', async () => {
@@ -559,9 +553,8 @@ describe('Audit Fixes', () => {
       const client = createHttpClient({ baseURL: 'https://api.example.com' });
       vi.stubGlobal('fetch', vi.fn().mockResolvedValue(mockResponse(200, {})));
 
-      await expect(client.get('https://evil.com/steal')).rejects.toThrow(
-        'Absolute URL',
-      );
+      await expect(client.get('https://evil.com/steal')).rejects.toThrow(HttpClientError);
+      await expect(client.get('https://evil.com/steal')).rejects.toThrow('Absolute URL');
       expect(vi.mocked(fetch)).not.toHaveBeenCalled();
     });
 
@@ -668,6 +661,224 @@ describe('Audit Fixes', () => {
 
       const init = vi.mocked(fetch).mock.calls[0][1] as RequestInit;
       expect(init.credentials).toBeUndefined();
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // #15 Critical: HttpClientError.cause is set from original error
+  // ---------------------------------------------------------------------------
+
+  describe('#15 HttpClientError.cause', () => {
+    it('should set cause to original fetch error on network failure', async () => {
+      const client = createHttpClient();
+      const originalError = new Error('connect ECONNREFUSED');
+      vi.stubGlobal('fetch', vi.fn().mockRejectedValue(originalError));
+
+      try {
+        await client.get('/test');
+        expect.fail('Should have thrown');
+      } catch (err) {
+        const error = err as HttpClientError;
+        expect(error).toBeInstanceOf(HttpClientError);
+        expect(error.cause).toBe(originalError);
+      }
+    });
+
+    it('should set cause on timeout error', async () => {
+      const client = createHttpClient({ timeout: 100 });
+      const timeoutError = new DOMException('The operation was aborted.', 'TimeoutError');
+      vi.stubGlobal('fetch', vi.fn().mockRejectedValue(timeoutError));
+
+      try {
+        await client.get('/test');
+        expect.fail('Should have thrown');
+      } catch (err) {
+        const error = err as HttpClientError;
+        expect(error.cause).toBe(timeoutError);
+        expect(error.message).toContain('timeout');
+      }
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // #16 Critical: FetchResponse<T | null> — 204 types correctly
+  // ---------------------------------------------------------------------------
+
+  describe('#16 204 null type', () => {
+    it('should return null data with correct type on 204', async () => {
+      const client = createHttpClient();
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+        status: 204,
+        ok: true,
+        headers: new Headers(),
+      } as unknown as Response));
+
+      const response = await client.delete<{ id: number }>('/resource/1');
+
+      expect(response.status).toBe(204);
+      expect(response.data).toBeNull();
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // #17 Important: Timeout validation
+  // ---------------------------------------------------------------------------
+
+  describe('#17 Timeout validation', () => {
+    it('should throw HttpClientError when timeout is 0', () => {
+      expect(() => createHttpClient({ timeout: 0 })).toThrow(HttpClientError);
+      expect(() => createHttpClient({ timeout: 0 })).toThrow('Invalid timeout');
+    });
+
+    it('should throw HttpClientError when timeout is negative', () => {
+      expect(() => createHttpClient({ timeout: -1 })).toThrow(HttpClientError);
+    });
+
+    it('should not throw when timeout is positive', () => {
+      expect(() => createHttpClient({ timeout: 5000 })).not.toThrow();
+    });
+
+    it('should not throw when timeout is omitted', () => {
+      expect(() => createHttpClient()).not.toThrow();
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // #18 Important: validateHeaders message accuracy
+  // ---------------------------------------------------------------------------
+
+  describe('#18 validateHeaders message', () => {
+    it('should mention "name" when header key contains CR/LF', async () => {
+      const client = createHttpClient();
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(mockResponse(200, {})));
+
+      await expect(
+        client.get('/test', { headers: { 'Bad\r\nHeader': 'value' } }),
+      ).rejects.toThrow(/name[\s\S]*contains forbidden/);
+    });
+
+    it('should mention "value" when header value contains CR/LF', async () => {
+      const client = createHttpClient();
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(mockResponse(200, {})));
+
+      await expect(
+        client.get('/test', { headers: { 'X-Custom': 'val\r\nInjected: x' } }),
+      ).rejects.toThrow(/value contains forbidden/);
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // #19 Critical: Request interceptor rejected handler returning undefined
+  // ---------------------------------------------------------------------------
+
+  describe('#19 Request interceptor rejected guard', () => {
+    it('should propagate original error when rejected handler returns undefined', async () => {
+      const client = createHttpClient();
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(mockResponse(200, {})));
+
+      const original = new Error('token expired');
+      client.interceptors.request.use(
+        () => { throw original; },
+        () => undefined as unknown as ReturnType<typeof Object>,
+      );
+
+      await expect(client.get('/test')).rejects.toBe(original);
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // #20 Critical: Response fulfilled interceptor error routing
+  // ---------------------------------------------------------------------------
+
+  describe('#20 Response fulfilled interceptor error routing', () => {
+    it('should route fulfilled-interceptor throw to same entry rejected handler', async () => {
+      const client = createHttpClient();
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(mockResponse(200, { data: 'ok' })));
+
+      const recovered = { data: { recovered: true }, status: 200, headers: {} };
+      client.interceptors.response.use(
+        () => { throw new Error('transform failed'); },
+        () => Promise.resolve(recovered),
+      );
+
+      const response = await client.get('/test');
+      expect(response.data).toEqual({ recovered: true });
+    });
+
+    it('should propagate throw when fulfilled interceptor throws with no rejected handler', async () => {
+      const client = createHttpClient();
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(mockResponse(200, {})));
+
+      client.interceptors.response.use(
+        () => { throw new Error('transform blew up'); },
+      );
+
+      await expect(client.get('/test')).rejects.toThrow('transform blew up');
+    });
+
+    it('should chain error to next interceptor rejected handler when first rejected also throws', async () => {
+      const client = createHttpClient();
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(mockResponse(200, {})));
+
+      const recovered = { data: { final: true }, status: 200, headers: {} };
+      client.interceptors.response.use(
+        () => { throw new Error('transform failed'); },
+        (err) => { throw err; }, // re-throw, pass to next
+      );
+      client.interceptors.response.use(
+        (r) => r,
+        () => Promise.resolve(recovered), // second interceptor recovers
+      );
+
+      const response = await client.get('/test');
+      expect(response.data).toEqual({ final: true });
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // #21 Critical: AbortSignal.any — signal + timeout both honoured
+  // ---------------------------------------------------------------------------
+
+  describe('#21 Signal + timeout combined', () => {
+    it('should abort via provided signal when AbortSignal.any is available', async () => {
+      const client = createHttpClient({ timeout: 30000 });
+      const controller = new AbortController();
+
+      let capturedSignal: AbortSignal | undefined;
+      vi.stubGlobal('fetch', vi.fn().mockImplementation((_url: string, init: RequestInit) => {
+        capturedSignal = init.signal as AbortSignal;
+        return new Promise((_resolve, reject) => {
+          init.signal!.addEventListener('abort', () =>
+            reject(new DOMException('Aborted', 'AbortError')),
+          );
+          // Abort the controller after signal is captured
+          Promise.resolve().then(() => controller.abort());
+        });
+      }));
+
+      await expect(client.get('/test', { signal: controller.signal })).rejects.toThrow();
+      // The signal passed to fetch should be a combined signal (different from the original)
+      expect(capturedSignal).toBeDefined();
+      expect(capturedSignal).toBeInstanceOf(AbortSignal);
+    });
+
+    it('should have an aborted combined signal when controller is aborted', async () => {
+      const client = createHttpClient({ timeout: 30000 });
+      const controller = new AbortController();
+      controller.abort(); // pre-abort
+
+      let capturedSignal: AbortSignal | undefined;
+      vi.stubGlobal('fetch', vi.fn().mockImplementation((_url: string, init: RequestInit) => {
+        capturedSignal = init.signal as AbortSignal;
+        return new Promise((_resolve, reject) => {
+          if (init.signal!.aborted) {
+            reject(new DOMException('Aborted', 'AbortError'));
+          }
+        });
+      }));
+
+      await expect(client.get('/test', { signal: controller.signal })).rejects.toThrow();
+      expect(capturedSignal?.aborted).toBe(true);
     });
   });
 });

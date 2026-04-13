@@ -1,5 +1,5 @@
 {
-  "name": "toteat-fetch",
+  "name": "@toteat-eng/toteat-fetch",
   "version": "0.1.0",
   "description": "Minimal fetch-based HTTP client with axios-compatible API surface",
   "type": "module",
@@ -8,6 +8,7 @@
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
       "default": "./dist/index.js"
     },
     "./ts": {
@@ -30,7 +31,12 @@
     "type": "git",
     "url": "git+ssh://git@github.com/toteat/toteat-fetch.git"
   },
-  "license": "UNLICENSED",
+  "license": "MIT",
+  "sideEffects": false,
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org"
+  },
   "devDependencies": {
     "typescript": "~6.0.0",
     "vitest": "^2.0.0",

@@ -1,16 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { createHttpClient, HttpClientError } from 'toteat-fetch';
-
-function mockResponse(status: number, data: unknown, contentType = 'application/json'): Response {
-  const responseHeaders = new Headers({ 'content-type': contentType });
-  return {
-    status,
-    ok: status >= 200 && status < 300,
-    headers: responseHeaders,
-    json: () => Promise.resolve(data),
-    text: () => Promise.resolve(typeof data === 'string' ? data : JSON.stringify(data)),
-  } as unknown as Response;
-}
+import { mockResponse } from './helpers.js';
 
 describe('fetchClient - Browser Tests', () => {
   beforeEach(() => {
@@ -105,6 +95,26 @@ describe('fetchClient - Browser Tests', () => {
       expect(url).toContain('deleted=false');
       expect(url).toContain('count=0');
       expect(url).toContain('val=-1');
+    });
+
+    it('should insert leading slash when path has no leading slash and baseURL is set', async () => {
+      const client = createHttpClient({ baseURL: 'https://api.example.com' });
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(mockResponse(200, {})));
+
+      await client.get('users/1');
+
+      const url = vi.mocked(fetch).mock.calls[0][0] as string;
+      expect(url).toBe('https://api.example.com/users/1');
+    });
+
+    it('should reject protocol-relative URLs when baseURL is configured', async () => {
+      const client = createHttpClient({ baseURL: 'https://api.example.com' });
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(mockResponse(200, {})));
+
+      await expect(client.get('//evil.com/steal')).rejects.toThrow(
+        'Absolute URL "//evil.com/steal" is not allowed when baseURL is configured',
+      );
+      expect(fetch).not.toHaveBeenCalled();
     });
   });
 
@@ -218,9 +228,8 @@ describe('fetchClient - Browser Tests', () => {
       expect(response.data).toBe(responseText);
     });
 
-    it('should fallback to text when JSON parsing fails', async () => {
+    it('should throw HttpClientError when JSON parsing fails (no silent fallback)', async () => {
       const client = createHttpClient();
-      const fallbackText = 'Invalid JSON text';
       const headers = new Headers({ 'content-type': 'application/json' });
 
       vi.stubGlobal(
@@ -230,13 +239,44 @@ describe('fetchClient - Browser Tests', () => {
           ok: true,
           headers,
           json: () => Promise.reject(new Error('JSON parse error')),
-          text: () => Promise.resolve(fallbackText),
+          text: () => Promise.resolve('Invalid JSON text'),
         } as unknown as Response),
       );
 
-      const response = await client.get('/test');
+      await expect(client.get('/test')).rejects.toThrow(HttpClientError);
+      await expect(client.get('/test')).rejects.toThrow('Failed to parse JSON response');
+    });
 
-      expect(response.data).toBe(fallbackText);
+    it('should throw HttpClientError when server declares application/json but sends malformed JSON', async () => {
+      const malformed = {
+        status: 200,
+        ok: true,
+        headers: new Headers({ 'content-type': 'application/json' }),
+        json: () => Promise.reject(new SyntaxError('Unexpected token < in JSON')),
+        text: () => Promise.resolve('<!DOCTYPE html>'),
+      } as unknown as Response;
+
+      const client = createHttpClient();
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(malformed));
+
+      await expect(client.get('/test')).rejects.toThrow(HttpClientError);
+      await expect(client.get('/test')).rejects.toThrow('Failed to parse JSON response');
+    });
+
+    it('should throw HttpClientError when text() reading fails', async () => {
+      const brokenBody = {
+        status: 200,
+        ok: true,
+        headers: new Headers({ 'content-type': 'text/plain' }),
+        json: () => Promise.reject(new TypeError('Already consumed')),
+        text: () => Promise.reject(new TypeError('Body already consumed')),
+      } as unknown as Response;
+
+      const client = createHttpClient();
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(brokenBody));
+
+      await expect(client.get('/test')).rejects.toThrow(HttpClientError);
+      await expect(client.get('/test')).rejects.toThrow('Failed to read response body');
     });
 
     it('should handle missing content-type gracefully', async () => {
@@ -344,13 +384,13 @@ describe('fetchClient - Browser Tests', () => {
       await expect(client.get('/test')).rejects.toThrow('Network Error');
     });
 
-    it('should throw HttpClientError for AbortError (timeout)', async () => {
+    it('should throw HttpClientError for AbortError (external abort is Network Error)', async () => {
       const client = createHttpClient({ timeout: 100 });
       const abortError = new DOMException('Aborted', 'AbortError');
       vi.stubGlobal('fetch', vi.fn().mockRejectedValue(abortError));
 
       await expect(client.get('/test')).rejects.toThrow(HttpClientError);
-      await expect(client.get('/test')).rejects.toThrow('timeout');
+      await expect(client.get('/test')).rejects.toThrow('Network Error');
     });
 
     it('should throw HttpClientError for TimeoutError', async () => {
@@ -360,6 +400,39 @@ describe('fetchClient - Browser Tests', () => {
 
       await expect(client.get('/test')).rejects.toThrow(HttpClientError);
       await expect(client.get('/test')).rejects.toThrow('timeout');
+    });
+
+    it('should report "Network Error" (not timeout) when fetch is aborted externally', async () => {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockRejectedValue(new DOMException('The user aborted a request.', 'AbortError')),
+      );
+
+      const client = createHttpClient({ timeout: 30000 });
+
+      try {
+        await client.get('/test');
+        expect.fail('should have thrown');
+      } catch (err) {
+        expect(err).toBeInstanceOf(HttpClientError);
+        expect((err as HttpClientError).message).toBe('Network Error');
+        expect((err as HttpClientError).message).not.toContain('timeout');
+      }
+    });
+
+    it('should preserve the original error as cause on network errors', async () => {
+      const originalError = new TypeError('Failed to fetch');
+      vi.stubGlobal('fetch', vi.fn().mockRejectedValue(originalError));
+
+      const client = createHttpClient();
+
+      try {
+        await client.get('/test');
+        expect.fail('should have thrown');
+      } catch (err) {
+        expect(err).toBeInstanceOf(HttpClientError);
+        expect((err as HttpClientError).cause).toBe(originalError);
+      }
     });
 
     it('should route network error to response interceptor rejected handler', async () => {
@@ -552,6 +625,34 @@ describe('fetchClient - Browser Tests', () => {
       expect(id1).toBe(0);
       expect(id2).toBe(1);
     });
+
+    it('should not mutate the original config headers when a request interceptor modifies them', async () => {
+      const client = createHttpClient({ headers: { Authorization: 'Bearer token' } });
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(mockResponse(200, {})));
+
+      client.interceptors.request.use((config) => {
+        config.headers['X-Added'] = 'yes';
+        return config;
+      });
+
+      // Make two requests
+      await client.get('/test');
+      await client.get('/test');
+
+      // Both requests should have the interceptor-added header (that's fine — it's applied each time)
+      // But neither should have leaked the mutation into the shared defaults
+      const firstCallHeaders = (vi.mocked(fetch).mock.calls[0][1] as RequestInit)
+        .headers as Record<string, string>;
+      const secondCallHeaders = (vi.mocked(fetch).mock.calls[1][1] as RequestInit)
+        .headers as Record<string, string>;
+
+      // Both calls should have Authorization from defaults
+      expect(firstCallHeaders['Authorization']).toBe('Bearer token');
+      expect(secondCallHeaders['Authorization']).toBe('Bearer token');
+      // Both calls should have X-Added from interceptor (applied fresh each time)
+      expect(firstCallHeaders['X-Added']).toBe('yes');
+      expect(secondCallHeaders['X-Added']).toBe('yes');
+    });
   });
 
   // ---------------------------------------------------------------------------
@@ -630,6 +731,34 @@ describe('fetchClient - Browser Tests', () => {
       await client.get('/test');
 
       expect(calls).toEqual([1, 2]);
+    });
+
+    it('should support async response interceptors', async () => {
+      const client = createHttpClient();
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(mockResponse(200, { original: true })));
+
+      client.interceptors.response.use(async (response) => {
+        await Promise.resolve(); // simulate async work
+        return { ...response, data: { ...(response.data as object), async: true } };
+      });
+
+      const result = await client.get<{ original: boolean; async: boolean }>('/test');
+      expect(result.data.original).toBe(true);
+      expect(result.data.async).toBe(true);
+    });
+
+    it('should pass each response interceptor the output of the previous one', async () => {
+      const client = createHttpClient();
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(mockResponse(200, { step: 0 })));
+
+      client.interceptors.response.use((r) => ({ ...r, data: { step: 1 } }));
+      client.interceptors.response.use((r) => ({
+        ...r,
+        data: { step: (r.data as { step: number }).step + 1 },
+      }));
+
+      const result = await client.get<{ step: number }>('/test');
+      expect(result.data.step).toBe(2);
     });
   });
 
@@ -721,6 +850,27 @@ describe('fetchClient - Browser Tests', () => {
 
       expect(response.status).toBe(201);
       expect((response.data as Created).success).toBe(true);
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // AbortSignal per-request
+  // ---------------------------------------------------------------------------
+
+  describe('per-request signal', () => {
+    it('should pass per-request signal to fetch when provided', async () => {
+      const controller = new AbortController();
+      const client = createHttpClient();
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(mockResponse(200, {})));
+
+      await client.get('/test', { signal: controller.signal });
+
+      const init = vi.mocked(fetch).mock.calls[0][1] as RequestInit;
+      // When AbortSignal.any is available, a combined signal is passed (not the original reference)
+      expect(init.signal).toBeInstanceOf(AbortSignal);
+      // Aborting the controller should abort the combined signal
+      controller.abort();
+      expect((init.signal as AbortSignal).aborted).toBe(true);
     });
   });
 });

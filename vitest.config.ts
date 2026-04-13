@@ -5,6 +5,7 @@ export default defineConfig({
   test: {
     environment: 'jsdom',
     include: ['__tests__/**/*.ts'],
+    exclude: ['**/__tests__/helpers.ts'],
   },
   resolve: {
     alias: {
