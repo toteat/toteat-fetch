@@ -936,8 +936,9 @@ describe('fetchClient - Browser Tests', () => {
         blob: () => Promise.reject(new Error('stream error')),
       } as unknown as Response));
 
-      await expect(client.get('/file', { responseType: 'blob' })).rejects.toThrow(HttpClientError);
-      await expect(client.get('/file', { responseType: 'blob' })).rejects.toThrow('Failed to read blob response');
+      const err = await client.get('/file', { responseType: 'blob' }).catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(HttpClientError);
+      expect((err as HttpClientError).message).toContain('Failed to read blob response');
     });
 
     it('without responseType still parses JSON normally', async () => {
