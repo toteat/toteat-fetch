@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { createHttpClient, HttpClientError } from 'toteat-fetch';
-import { mockResponse } from './helpers.js';
+import { mockResponse, mockBlobResponse } from './helpers.js';
 
 describe('fetchClient - Browser Tests', () => {
   beforeEach(() => {
@@ -871,6 +871,82 @@ describe('fetchClient - Browser Tests', () => {
       // Aborting the controller should abort the combined signal
       controller.abort();
       expect((init.signal as AbortSignal).aborted).toBe(true);
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // responseType: blob
+  // ---------------------------------------------------------------------------
+
+  describe('responseType: blob', () => {
+    it('passes responseType through internal config (smoke test via blob response)', async () => {
+      const client = createHttpClient({ baseURL: 'https://api.example.com' });
+      const blob = new Blob(['binary'], { type: 'application/octet-stream' });
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(mockBlobResponse(200, blob)));
+
+      const res = await client.get('/file', { responseType: 'blob' });
+
+      expect(res.data).toBeInstanceOf(Blob);
+    });
+
+    it('ignores content-type when responseType is blob', async () => {
+      const client = createHttpClient({ baseURL: 'https://api.example.com' });
+      const blob = new Blob(['{"key":"value"}'], { type: 'application/json' });
+      const jsonSpy = vi.fn().mockRejectedValue(new Error('should not call json()'));
+      const textSpy = vi.fn().mockRejectedValue(new Error('should not call text()'));
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+        status: 200,
+        ok: true,
+        headers: new Headers({ 'content-type': 'application/json' }),
+        blob: () => Promise.resolve(blob),
+        json: jsonSpy,
+        text: textSpy,
+      } as unknown as Response));
+
+      const res = await client.get<Blob>('/file', { responseType: 'blob' });
+
+      expect(res.data).toBeInstanceOf(Blob);
+      expect(jsonSpy).not.toHaveBeenCalled();
+      expect(textSpy).not.toHaveBeenCalled();
+    });
+
+    it('returns null data for 204 even with responseType: blob', async () => {
+      const client = createHttpClient({ baseURL: 'https://api.example.com' });
+      const blobSpy = vi.fn().mockRejectedValue(new Error('should not call blob()'));
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+        status: 204,
+        ok: true,
+        headers: new Headers(),
+        blob: blobSpy,
+      } as unknown as Response));
+
+      const res = await client.get('/file', { responseType: 'blob' });
+
+      expect(res.data).toBeNull();
+      expect(res.status).toBe(204);
+      expect(blobSpy).not.toHaveBeenCalled();
+    });
+
+    it('throws HttpClientError when blob() rejects', async () => {
+      const client = createHttpClient({ baseURL: 'https://api.example.com' });
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+        status: 200,
+        ok: true,
+        headers: new Headers({ 'content-type': 'application/octet-stream' }),
+        blob: () => Promise.reject(new Error('stream error')),
+      } as unknown as Response));
+
+      await expect(client.get('/file', { responseType: 'blob' })).rejects.toThrow(HttpClientError);
+      await expect(client.get('/file', { responseType: 'blob' })).rejects.toThrow('Failed to read blob response');
+    });
+
+    it('without responseType still parses JSON normally', async () => {
+      const client = createHttpClient({ baseURL: 'https://api.example.com' });
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(mockResponse(200, { id: 1 })));
+
+      const res = await client.get<{ id: number }>('/data');
+
+      expect(res.data).toEqual({ id: 1 });
     });
   });
 });

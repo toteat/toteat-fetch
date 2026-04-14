@@ -30,7 +30,10 @@ export async function executeRequest<T>(
     const entry = reqHandlers[i];
     if (!entry?.fulfilled) continue;
     try {
-      // Spread-merge preserves body (interceptors see InterceptorRequestConfig, no body field)
+      // Spread-merge preserves body (interceptors see InterceptorRequestConfig, no body field).
+      // Note: interceptors that explicitly set a field to undefined will clobber the caller's
+      // value (e.g. responseType: undefined from an interceptor removes a caller-set responseType).
+      // Interceptors should return only the fields they intend to change.
       const result = await Promise.resolve(entry.fulfilled(processedConfig));
       processedConfig = { ...processedConfig, ...result };
     } catch (err) {
@@ -175,6 +178,18 @@ export async function executeRequest<T>(
 
   if (fetchResponse.status === 204) {
     data = null;
+  } else if (processedConfig.responseType === 'blob') {
+    try {
+      data = (await fetchResponse.blob()) as unknown as T;
+    } catch (blobErr) {
+      throw new HttpClientError(
+        `Failed to read blob response from ${processedConfig.method} ${processedConfig.url}: ${String(blobErr)}`,
+        fetchResponse.status,
+        undefined,
+        responseHeaders,
+        blobErr,   // preserve original blob error as cause
+      );
+    }
   } else {
     const contentType = fetchResponse.headers.get('content-type') ?? '';
     if (contentType.includes('application/json')) {

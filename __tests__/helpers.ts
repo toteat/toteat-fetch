@@ -22,3 +22,19 @@ export function mock204Response(): Response {
     text: () => Promise.resolve(''),
   } as unknown as Response;
 }
+
+export function mockBlobResponse(
+  status: number,
+  blob: Blob,
+  contentType = 'application/octet-stream',
+): Response {
+  const responseHeaders = new Headers({ 'content-type': contentType });
+  return {
+    status,
+    ok: status >= 200 && status < 300,
+    headers: responseHeaders,
+    blob: () => Promise.resolve(blob),
+    json: () => Promise.reject(new Error('Not JSON')),
+    text: () => Promise.reject(new Error('Not text')),
+  } as unknown as Response;
+}

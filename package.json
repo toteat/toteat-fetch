@@ -1,6 +1,6 @@
 {
   "name": "@toteat-eng/toteat-fetch",
-  "version": "0.1.0",
+  "version": "0.2.1",
   "description": "Minimal fetch-based HTTP client with axios-compatible API surface",
   "type": "module",
   "main": "./dist/index.js",
@@ -16,7 +16,10 @@
       "default": "./src/index.ts"
     }
   },
-  "files": ["dist", "src"],
+  "files": [
+    "dist",
+    "src"
+  ],
   "scripts": {
     "build": "tsc",
     "test": "vitest run",

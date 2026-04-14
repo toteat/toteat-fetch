@@ -4,6 +4,8 @@
 
 export type ParamValue = string | number | boolean | null | undefined;
 
+export type ResponseType = 'blob';
+
 // ---------------------------------------------------------------------------
 // Public config types
 // ---------------------------------------------------------------------------
@@ -21,6 +23,7 @@ export interface RequestConfig {
   headers?: Record<string, string>;
   validateStatus?: (status: number) => boolean;
   signal?: AbortSignal;
+  responseType?: ResponseType;
 }
 
 export interface FetchResponse<T = unknown> {
@@ -67,6 +70,7 @@ export interface InterceptorRequestConfig {
   validateStatus: (status: number) => boolean;
   credentials?: RequestCredentials;
   signal?: AbortSignal;
+  responseType?: ResponseType;
 }
 
 export type RequestInterceptorType = (

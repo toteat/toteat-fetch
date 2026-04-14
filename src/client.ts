@@ -59,6 +59,7 @@ export function createHttpClient(defaults: FetchClientConfig = {}): FetchClientI
       validateStatus: config?.validateStatus ?? defaultValidateStatus,
       credentials: defaults.credentials,
       signal: config?.signal,
+      responseType: config?.responseType,
     };
   }
 

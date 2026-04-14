@@ -6,6 +6,7 @@ export type {
   InterceptorRequestConfig,
   IInterceptorManager,
   ParamValue,
+  ResponseType,
   ResponseInterceptorType,
   ResponseErrorHandlerType,
   RequestInterceptorType,
