@@ -1111,4 +1111,175 @@ describe('Audit Fixes', () => {
       }
     });
   });
+
+  // ---------------------------------------------------------------------------
+  // #1 delete() can send a request body via config.data
+  // ---------------------------------------------------------------------------
+
+  describe('#1 DELETE request body', () => {
+    it('should send a JSON body on DELETE when config.data is provided', async () => {
+      const client = createHttpClient();
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(mockResponse(200, {})));
+
+      await client.delete('/test', { data: { foo: 'bar' } });
+
+      const init = vi.mocked(fetch).mock.calls[0][1] as RequestInit;
+      expect(init.body).toBe(JSON.stringify({ foo: 'bar' }));
+      const headers = init.headers as Record<string, string>;
+      expect(headers['Content-Type']).toBe('application/json');
+    });
+
+    it('should send no body on DELETE when config.data is absent', async () => {
+      const client = createHttpClient();
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(mockResponse(200, {})));
+
+      await client.delete('/test');
+
+      const init = vi.mocked(fetch).mock.calls[0][1] as RequestInit;
+      expect(init.body).toBeUndefined();
+    });
+
+    it('should send no body on DELETE when config.data is null', async () => {
+      const client = createHttpClient();
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(mockResponse(200, {})));
+
+      await client.delete('/test', { data: null });
+
+      const init = vi.mocked(fetch).mock.calls[0][1] as RequestInit;
+      expect(init.body).toBeUndefined();
+    });
+
+    it('should send the body alongside params and headers on DELETE', async () => {
+      const client = createHttpClient({ baseURL: 'https://api.example.com' });
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(mockResponse(200, {})));
+
+      await client.delete('/test', {
+        data: { foo: 'bar' },
+        params: { locale: 'es' },
+        headers: { 'X-Custom': 'yes' },
+      });
+
+      const [url, init] = vi.mocked(fetch).mock.calls[0] as [string, RequestInit];
+      expect(url).toContain('locale=es');
+      expect(init.body).toBe(JSON.stringify({ foo: 'bar' }));
+      const headers = init.headers as Record<string, string>;
+      expect(headers['X-Custom']).toBe('yes');
+      expect(headers['Content-Type']).toBe('application/json');
+    });
+
+    it('should pass a FormData body through untouched on DELETE without forcing Content-Type', async () => {
+      const client = createHttpClient();
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(mockResponse(200, {})));
+      const form = new FormData();
+      form.append('key', 'value');
+
+      await client.delete('/test', { data: form });
+
+      const init = vi.mocked(fetch).mock.calls[0][1] as RequestInit;
+      expect(init.body).toBe(form);
+      const headers = init.headers as Record<string, string>;
+      expect(headers['Content-Type']).toBeUndefined();
+    });
+
+    it('should not override an explicit Content-Type on a DELETE body', async () => {
+      const client = createHttpClient();
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(mockResponse(200, {})));
+
+      await client.delete('/test', {
+        data: { foo: 'bar' },
+        headers: { 'Content-Type': 'application/vnd.api+json' },
+      });
+
+      const init = vi.mocked(fetch).mock.calls[0][1] as RequestInit;
+      const headers = init.headers as Record<string, string>;
+      expect(headers['Content-Type']).toBe('application/vnd.api+json');
+      expect(init.body).toBe(JSON.stringify({ foo: 'bar' }));
+    });
+
+    it('should throw a TypeError when a body is passed to GET', () => {
+      const client = createHttpClient();
+      const fetchMock = vi.fn().mockResolvedValue(mockResponse(200, {}));
+      vi.stubGlobal('fetch', fetchMock);
+
+      expect(() => client.get('/test', { data: { foo: 'bar' } })).toThrow(TypeError);
+      expect(() => client.get('/test', { data: { foo: 'bar' } })).toThrow(
+        /cannot send a request body/,
+      );
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it('should not throw on GET when config.data is null', async () => {
+      const client = createHttpClient();
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(mockResponse(200, {})));
+
+      await client.get('/test', { data: null });
+
+      const init = vi.mocked(fetch).mock.calls[0][1] as RequestInit;
+      expect(init.body).toBeUndefined();
+    });
+
+    it('should throw a TypeError when a body is passed both positionally and as config.data', () => {
+      const client = createHttpClient();
+      const fetchMock = vi.fn().mockResolvedValue(mockResponse(200, {}));
+      vi.stubGlobal('fetch', fetchMock);
+
+      expect(() => client.post('/test', { a: 1 }, { data: { b: 2 } })).toThrow(TypeError);
+      expect(() => client.post('/test', { a: 1 }, { data: { b: 2 } })).toThrow(
+        /both positionally and as config\.data/,
+      );
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it('should send the body from config.data when the positional data is undefined', async () => {
+      const client = createHttpClient();
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(mockResponse(200, {})));
+
+      await client.post('/test', undefined, { data: { b: 2 } });
+
+      const init = vi.mocked(fetch).mock.calls[0][1] as RequestInit;
+      expect(init.body).toBe(JSON.stringify({ b: 2 }));
+    });
+
+    it('should throw a TypeError when a top-level function body is not JSON-serializable', () => {
+      const client = createHttpClient();
+      const fetchMock = vi.fn().mockResolvedValue(mockResponse(200, {}));
+      vi.stubGlobal('fetch', fetchMock);
+
+      expect(() => client.delete('/test', { data: () => {} })).toThrow(TypeError);
+      expect(() => client.delete('/test', { data: () => {} })).toThrow(
+        /not JSON-serializable/,
+      );
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it('should throw a TypeError when a Symbol body is not JSON-serializable', () => {
+      const client = createHttpClient();
+      const fetchMock = vi.fn().mockResolvedValue(mockResponse(200, {}));
+      vi.stubGlobal('fetch', fetchMock);
+
+      expect(() => client.post('/test', Symbol('x'))).toThrow(TypeError);
+      expect(() => client.post('/test', Symbol('x'))).toThrow(/not JSON-serializable/);
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it('should not throw when a function is nested inside an array body', async () => {
+      const client = createHttpClient();
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(mockResponse(200, {})));
+
+      await client.delete('/test', { data: [() => {}] });
+
+      const init = vi.mocked(fetch).mock.calls[0][1] as RequestInit;
+      expect(init.body).toBe('[null]');
+    });
+
+    it('should not throw when a function is nested inside an object body', async () => {
+      const client = createHttpClient();
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(mockResponse(200, {})));
+
+      await client.delete('/test', { data: { fn: () => {} } });
+
+      const init = vi.mocked(fetch).mock.calls[0][1] as RequestInit;
+      expect(init.body).toBe('{}');
+    });
+  });
 });

@@ -60,12 +60,23 @@ interface FetchResponse<T> {
 
 ```typescript
 interface RequestConfig {
+  data?: unknown;       // request body — JSON-serialized unless FormData/Blob/ArrayBuffer/URLSearchParams/ReadableStream
   params?: Record<string, string | number | boolean | null | undefined | Array<...>>;
   headers?: Record<string, string>;
   validateStatus?: (status: number) => boolean;
   signal?: AbortSignal; // per-request cancellation
+  responseType?: 'blob';
 }
 ```
+
+`delete` sends a body through `config.data`, since it takes no positional `data` argument:
+
+```typescript
+await client.delete('/locals/42/settings/comment_settings', { data: { id: 7 } });
+```
+
+A `TypeError` is thrown synchronously if a body is passed to `get`, or if `post`/`put`/`patch`
+receive a body both positionally and as `config.data`.
 
 ### Errors
 
