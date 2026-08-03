@@ -19,6 +19,14 @@ export interface FetchClientConfig {
 }
 
 export interface RequestConfig {
+  /**
+   * Request body. Serialized as JSON unless it is a stream/binary body
+   * (FormData, Blob, ArrayBuffer, URLSearchParams, ReadableStream).
+   * For methods that also take a positional `data` argument (post, put, patch),
+   * pass one or the other — passing both throws a TypeError.
+   * GET cannot carry a body and throws a TypeError if given one.
+   */
+  data?: unknown;
   params?: Record<string, ParamValue | ParamValue[]>;
   headers?: Record<string, string>;
   validateStatus?: (status: number) => boolean;

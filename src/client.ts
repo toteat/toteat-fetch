@@ -31,14 +31,33 @@ export function createHttpClient(defaults: FetchClientConfig = {}): FetchClientI
     data?: unknown,
     config?: RequestConfig,
   ): InternalRequestConfig {
+    if (data !== undefined && config?.data !== undefined) {
+      throw new TypeError(
+        `${method} ${url}: request body passed both positionally and as config.data. Pass one.`,
+      );
+    }
+
+    const bodySource = data !== undefined ? data : config?.data;
+
+    // Only GET is checked: FetchClientInstance exposes no head() method, so buildConfig('HEAD', ...)
+    // is unreachable today. Add HEAD back here if a head() method ever ships.
+    if (method === 'GET' && bodySource !== undefined && bodySource !== null) {
+      throw new TypeError(`${method} ${url}: cannot send a request body.`);
+    }
+
     const mergedHeaders = { ...defaults.headers, ...config?.headers };
 
     let body: BodyInit | null | undefined;
-    if (data !== undefined && data !== null) {
-      if (isStreamBody(data)) {
-        body = data;
+    if (bodySource !== undefined && bodySource !== null) {
+      if (isStreamBody(bodySource)) {
+        body = bodySource;
       } else {
-        body = JSON.stringify(data);
+        body = JSON.stringify(bodySource);
+        if (body === undefined) {
+          throw new TypeError(
+            `${method} ${url}: request body is not JSON-serializable (received ${typeof bodySource}).`,
+          );
+        }
         const hasContentType = Object.keys(mergedHeaders).some(
           (k) => k.toLowerCase() === 'content-type',
         );
